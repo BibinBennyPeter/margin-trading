@@ -37,7 +37,14 @@ contract MarginTradeManager {
     mapping(address => bool) public supportedCollateralTokens;
 
     // Storage
-    mapping(address => Position) public positions;
+    // Each user's positions mapped by a unique position ID.
+    mapping(address => mapping(uint256 => Position)) public positions;
+
+    // Tracks the list of position IDs for each user (to maintain ordering).
+    mapping(address => uint256[]) public userPositionIds;
+
+    // Counter for the number of positions per user (to generate unique IDs).
+    mapping(address => uint256) public userPositionCount;
     address[] public tradersWithPositions;
 
     // Fees configuration
@@ -141,7 +148,11 @@ contract MarginTradeManager {
      */
     function depositMargin() external payable {
         require(msg.value > 0, "Deposit must be > 0");
-        Position storage pos = positions[msg.sender];
+
+        // Retrieve the user's current position count as the n
+        uint256 newPositionId = userPositionCount[msg.sender];
+
+        Position storage pos = positions[msg.sender][newPositionId];
         pos.margin += msg.value;
 
         // If this is the first deposit, set collateral as ETH (address(0))
@@ -166,7 +177,10 @@ contract MarginTradeManager {
         require(supportedCollateralTokens[tokenAddress], "Token not supported");
         require(amount > 0, "Deposit must be > 0");
 
-        Position storage pos = positions[msg.sender];
+        // Retrieve the user's current position count as the n
+        uint256 newPositionId = userPositionCount[msg.sender];
+
+        Position storage pos = positions[msg.sender][newPositionId];
 
         // If this is the first deposit for this position, set the collateral token
         if (pos.margin == 0) {
@@ -192,8 +206,8 @@ contract MarginTradeManager {
      * @notice Withdraw available margin (margin not locked in positions)
      * @param amount Amount of margin to withdraw
      */
-    function withdrawMargin(uint256 amount) external {
-        Position storage pos = positions[msg.sender];
+    function withdrawMargin(uint256 positionId, uint256 amount) external {
+        Position storage pos = positions[msg.sender][positionId];
         require(amount > 0, "Withdraw amount must be > 0");
 
         // Calculate available margin (total margin - locked margin)
@@ -239,7 +253,12 @@ contract MarginTradeManager {
         bool _reduceOnly,
         PositionType _positionType
     ) external {
-        Position storage pos = positions[msg.sender];
+        // Retrieve the user's current position count as the new position ID.
+        uint256 newPositionId = userPositionCount[msg.sender];
+        userPositionCount[msg.sender]++;
+
+        // Access or create a Position storage reference for the new ID.
+        Position storage pos = positions[msg.sender][newPositionId];
 
         // Position validation
         require(pos.margin >= minMargin, "Insufficient margin balance");
@@ -260,6 +279,7 @@ contract MarginTradeManager {
         uint256 positionValue = _positionSize * currentPrice;
         uint256 openFee = _calculateAndCollectFee(
             msg.sender,
+            newPositionId,
             positionValue,
             openFeeRate
         );
@@ -272,6 +292,7 @@ contract MarginTradeManager {
         // Update position details
         _updatePositionDetails(
             msg.sender,
+            newPositionId,
             _positionSize,
             currentPrice,
             _leverage,
@@ -279,6 +300,9 @@ contract MarginTradeManager {
             _reduceOnly,
             _positionType
         );
+
+        // Record the new position ID for the user.
+        userPositionIds[msg.sender].push(newPositionId);
 
         // For ERC20 tokens, transfer to the fee collector
         if (pos.collateralToken == address(0)) {
@@ -313,15 +337,13 @@ contract MarginTradeManager {
     /**
      * @notice Close an open position
      */
-    function closePosition() external {
-        Position storage pos = positions[msg.sender];
-        require(pos.open, "No open position");
-
-        _closePosition(msg.sender);
+    function closePosition(uint256 positionId) external {
+        _closePosition(positionId);
     }
 
-    function _closePosition(address trader) internal {
-        Position storage pos = positions[trader];
+    function _closePosition(uint256 positionId) internal {
+        // Retrieve the position using the sender's address and the provided position ID.
+        Position storage pos = positions[msg.sender][positionId];
         require(pos.open, "No open position");
 
         uint256 currentPrice = getLatestPrice(pos.collateralToken);
@@ -355,7 +377,10 @@ contract MarginTradeManager {
         }
 
         // Reset position
-        _resetPositionDetails(msg.sender, finalMargin, closeFee);
+        _resetPositionDetails(msg.sender, positionId, finalMargin, closeFee);
+
+        // Remove the closed position from the user's auxiliary array.
+        _removePositionId(msg.sender, positionId);
 
         emit PositionClosed(msg.sender, pnl, closeFee, currentPrice);
 
@@ -366,8 +391,8 @@ contract MarginTradeManager {
     /**
      * @notice Update position metrics with latest price
      */
-    function updatePosition() external {
-        Position storage pos = positions[msg.sender];
+    function updatePosition(uint256 positionId) external {
+        Position storage pos = positions[msg.sender][positionId];
         require(pos.open, "No open position");
 
         uint256 currentPrice = getLatestPrice(pos.collateralToken);
@@ -404,12 +429,13 @@ contract MarginTradeManager {
         bool shouldLiquidate = liquidationEngine.checkLiquidation(msg.sender);
         if (shouldLiquidate) {
             // Close position if liquidation is needed
-            _closePosition(msg.sender);
+            _closePosition(positionId);
         }
     }
 
     function _updatePositionDetails(
         address user,
+        uint256 positionId,
         uint256 _positionSize,
         uint256 currentPrice,
         uint256 _leverage,
@@ -417,7 +443,7 @@ contract MarginTradeManager {
         bool _reduceOnly,
         PositionType _positionType
     ) internal {
-        Position storage pos = positions[user];
+        Position storage pos = positions[user][positionId];
 
         // Update position
         pos.positionSize = _positionSize;
@@ -438,10 +464,11 @@ contract MarginTradeManager {
 
     function _resetPositionDetails(
         address user,
+        uint256 positionId,
         uint256 finalMargin,
         uint256 closeFee
     ) internal {
-        Position storage pos = positions[user];
+        Position storage pos = positions[user][positionId];
 
         // Reset position
         pos.open = false;
@@ -488,12 +515,26 @@ contract MarginTradeManager {
         }
     }
 
+    function _removePositionId(address user, uint256 positionId) internal {
+        uint256[] storage ids = userPositionIds[user];
+        uint256 len = ids.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (ids[i] == positionId) {
+                // Swap with the last element and pop for efficiency.
+                ids[i] = ids[len - 1];
+                ids.pop();
+                break;
+            }
+        }
+    }
+
     function _calculateAndCollectFee(
         address user,
+        uint256 positionId,
         uint256 positionValue,
         uint256 feeRate
     ) internal returns (uint256) {
-        Position storage pos = positions[user];
+        Position storage pos = positions[user][positionId];
         uint256 fee = (positionValue * feeRate) / 10000;
 
         // Update fees and deduct from margin
