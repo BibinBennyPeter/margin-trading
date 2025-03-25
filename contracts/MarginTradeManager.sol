@@ -1,30 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/ILiquidationEngine.sol";
-contract MarginTradeManager{
+contract MarginTradeManager {
     ILiquidationEngine public liquidationEngine;
-    // AggregatorV3Interface public priceFeed;
+
     // Position management
-    enum PositionType { LONG, SHORT }
-    
+    enum PositionType {
+        LONG,
+        SHORT
+    }
+
     struct Position {
         address owner;
         address collateralToken;
-        uint256 margin;           
-        uint256 positionSize;     
-        uint256 entryPrice;       
-        bool open;                
-        int256 lastEffectiveMargin; 
-        uint256 lastMarginRatio;    
-        uint256 lastUpdated;      
-        // Trading parameters  
-        uint256 leverage;         
-        uint256 sltp;             
-        bool reduceOnly;          
+        uint256 margin;
+        uint256 positionSize;
+        uint256 entryPrice;
+        bool open;
+        int256 lastEffectiveMargin;
+        uint256 lastMarginRatio;
+        uint256 lastUpdated;
+        // Trading parameters
+        uint256 leverage;
+        uint256 sltp;
+        bool reduceOnly;
         PositionType positionType;
         // Trading metrics
         uint256 realizedPnL;
@@ -37,19 +39,27 @@ contract MarginTradeManager{
     // Storage
     mapping(address => Position) public positions;
     address[] public tradersWithPositions;
-    
+
     // Fees configuration
     uint256 public openFeeRate = 10; // 0.1% (in basis points)
     uint256 public closeFeeRate = 15; // 0.15% (in basis points)
     address public feeCollector;
-    
+
     // Limits
     uint256 public maxLeverage = 100; // 100x max leverage
     uint256 public minMargin = 0.01 ether;
 
     // Events
-    event MarginDeposited(address indexed user, address indexed token, uint256 amount);
-    event MarginWithdrawn(address indexed user, address indexed token, uint256 amount);
+    event MarginDeposited(
+        address indexed user,
+        address indexed token,
+        uint256 amount
+    );
+    event MarginWithdrawn(
+        address indexed user,
+        address indexed token,
+        uint256 amount
+    );
     event PositionOpened(
         address indexed user,
         uint256 positionSize,
@@ -66,62 +76,66 @@ contract MarginTradeManager{
         uint256 exitPrice
     );
     event PositionUpdated(
-        address indexed user, 
-        int256 effectiveMargin, 
-        uint256 marginRatio, 
+        address indexed user,
+        int256 effectiveMargin,
+        uint256 marginRatio,
         uint256 timestamp
     );
 
     // --- Owner management ---
     address private owner;
-    
+
     modifier onlyOwner() {
         require(msg.sender == owner, "Only owner can call this function");
         _;
     }
 
-    constructor(address _liquidationEngineAddress, 
-    // address _priceFeedAddress,?
-     address _feeCollector) {
+    constructor(address _liquidationEngineAddress, address _feeCollector) {
         liquidationEngine = ILiquidationEngine(_liquidationEngineAddress);
-        // priceFeed = AggregatorV3Interface(_priceFeedAddress);
         feeCollector = _feeCollector;
     }
 
-     // --- Admin Functions ---
-    
-    function setFeeRates(uint256 _openFeeRate, uint256 _closeFeeRate) external onlyOwner {
+    // --- Admin Functions ---
+
+    function setFeeRates(
+        uint256 _openFeeRate,
+        uint256 _closeFeeRate
+    ) external onlyOwner {
         openFeeRate = _openFeeRate;
         closeFeeRate = _closeFeeRate;
     }
-    
+
     function setFeeCollector(address _feeCollector) external onlyOwner {
         require(_feeCollector != address(0), "Invalid address");
         feeCollector = _feeCollector;
     }
-    
+
     function setMaxLeverage(uint256 _maxLeverage) external onlyOwner {
         require(_maxLeverage > 0, "Max leverage must be > 0");
         maxLeverage = _maxLeverage;
     }
-    
+
     function setMinMargin(uint256 _minMargin) external onlyOwner {
         minMargin = _minMargin;
     }
 
     // Function to add supported tokens
-    function addSupportedCollateralToken(address tokenAddress) external onlyOwner {
+    function addSupportedCollateralToken(
+        address tokenAddress
+    ) external onlyOwner {
         require(tokenAddress != address(0), "Invalid token address");
         supportedCollateralTokens[tokenAddress] = true;
     }
 
     // Function to remove supported tokens
-    function removeSupportedCollateralToken(address tokenAddress) external onlyOwner {
+    function removeSupportedCollateralToken(
+        address tokenAddress
+    ) external onlyOwner {
         supportedCollateralTokens[tokenAddress] = false;
     }
 
     // --- Trading Functions ---
-    
+
     /**
      * @notice Deposit margin for trading using ETH
      */
@@ -134,40 +148,46 @@ contract MarginTradeManager{
         if (pos.margin == 0) {
             pos.collateralToken = address(0); // Use address(0) to represent ETH
         } else {
-        // Ensure same collateral type
-            require(pos.collateralToken == address(0), "Cannot mix collateral types");
+            // Ensure same collateral type
+            require(
+                pos.collateralToken == address(0),
+                "Cannot mix collateral types"
+            );
         }
-        
+
         emit MarginDeposited(msg.sender, address(0), msg.value);
     }
     /**
-    * @notice Deposit margin for trading using ERC20 tokens
-    * @param tokenAddress Address of the ERC20 token to deposit
-    * @param amount Amount of tokens to deposit
-    */
+     * @notice Deposit margin for trading using ERC20 tokens
+     * @param tokenAddress Address of the ERC20 token to deposit
+     * @param amount Amount of tokens to deposit
+     */
     function depositMarginERC20(address tokenAddress, uint256 amount) external {
         require(supportedCollateralTokens[tokenAddress], "Token not supported");
         require(amount > 0, "Deposit must be > 0");
-        
+
         Position storage pos = positions[msg.sender];
-        
+
         // If this is the first deposit for this position, set the collateral token
         if (pos.margin == 0) {
             pos.collateralToken = tokenAddress;
         } else {
             // If not first deposit, ensure same token is used
-            require(pos.collateralToken == tokenAddress, "Cannot mix collateral tokens");
+            require(
+                pos.collateralToken == tokenAddress,
+                "Cannot mix collateral tokens"
+            );
         }
-        
+
         // Transfer tokens from user to contract
         IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
-        
+
         // Update margin
         pos.margin += amount;
-        
+
         emit MarginDeposited(msg.sender, tokenAddress, amount);
     }
-    
+
     /**
      * @notice Withdraw available margin (margin not locked in positions)
      * @param amount Amount of margin to withdraw
@@ -175,7 +195,7 @@ contract MarginTradeManager{
     function withdrawMargin(uint256 amount) external {
         Position storage pos = positions[msg.sender];
         require(amount > 0, "Withdraw amount must be > 0");
-        
+
         // Calculate available margin (total margin - locked margin)
         uint256 lockedMargin = 0;
         if (pos.open) {
@@ -183,13 +203,15 @@ contract MarginTradeManager{
             uint256 currentPrice = getLatestPrice(pos.collateralToken);
             lockedMargin = (pos.positionSize * currentPrice) / pos.leverage;
         }
-        
-        uint256 availableMargin = pos.margin > lockedMargin ? pos.margin - lockedMargin : 0;
+
+        uint256 availableMargin = pos.margin > lockedMargin
+            ? pos.margin - lockedMargin
+            : 0;
         require(amount <= availableMargin, "Insufficient available margin");
-        
+
         // Update margin balance
         pos.margin -= amount;
-        
+
         // Transfer tokens based on collateral type
         if (pos.collateralToken == address(0)) {
             // Transfer ETH
@@ -198,11 +220,11 @@ contract MarginTradeManager{
             // Transfer ERC20 tokens
             IERC20(pos.collateralToken).transfer(msg.sender, amount);
         }
-        
+
         emit MarginWithdrawn(msg.sender, pos.collateralToken, amount);
     }
 
-     /**
+    /**
      * @notice Open a new trading position
      * @param _positionSize The size of the trade
      * @param _leverage The leverage factor (1-100)
@@ -218,53 +240,53 @@ contract MarginTradeManager{
         PositionType _positionType
     ) external {
         Position storage pos = positions[msg.sender];
-        
+
         // Position validation
         require(pos.margin >= minMargin, "Insufficient margin balance");
         require(!pos.open, "Position already open");
         require(_positionSize > 0, "Position size must be > 0");
         require(_leverage > 0 && _leverage <= maxLeverage, "Invalid leverage");
-        
+
         uint256 currentPrice = getLatestPrice(pos.collateralToken);
-        
+
         // Calculate required margin
         uint256 requiredMargin = (_positionSize * currentPrice) / _leverage;
-        require(pos.margin >= requiredMargin, "Insufficient margin for position size");
-        
+        require(
+            pos.margin >= requiredMargin,
+            "Insufficient margin for position size"
+        );
+
         // Calculate and collect fees
         uint256 positionValue = _positionSize * currentPrice;
-        uint256 openFee = _calculateAndCollectFee(msg.sender, positionValue, openFeeRate);
+        uint256 openFee = _calculateAndCollectFee(
+            msg.sender,
+            positionValue,
+            openFeeRate
+        );
         // uint256 openFee = (positionValue * openFeeRate) / 10000;
-        require(pos.margin >= requiredMargin + openFee, "Insufficient margin for fees");
+        require(
+            pos.margin >= requiredMargin + openFee,
+            "Insufficient margin for fees"
+        );
 
         // Update position details
-        _updatePositionDetails(msg.sender, _positionSize, currentPrice, _leverage, _sltp, _reduceOnly, _positionType);
-    
-        
-        // Update position
-        // pos.positionSize = _positionSize;
-        // pos.entryPrice = currentPrice;
-        // pos.open = true;
-        // pos.leverage = _leverage;
-        // pos.sltp = _sltp;
-        // pos.reduceOnly = _reduceOnly;
-        // pos.positionType = _positionType;
-        // pos.fees += openFee;
-        // pos.margin -= openFee; // Deduct fee from margin
-        
-        // // Calculate effective margin and margin ratio
-        // // int256 pnl = 0; // No PnL at position open
-        // pos.lastEffectiveMargin = int256(pos.margin);
-        // pos.lastMarginRatio = (pos.margin * 100) / (pos.positionSize * currentPrice);
-        // pos.lastUpdated = block.timestamp;
-        
+        _updatePositionDetails(
+            msg.sender,
+            _positionSize,
+            currentPrice,
+            _leverage,
+            _sltp,
+            _reduceOnly,
+            _positionType
+        );
+
         // For ERC20 tokens, transfer to the fee collector
         if (pos.collateralToken == address(0)) {
             payable(feeCollector).transfer(openFee);
         } else {
             IERC20(pos.collateralToken).transfer(feeCollector, openFee);
         }
-        
+
         // Add user to active positions if not already there
         bool userExists = false;
         for (uint i = 0; i < tradersWithPositions.length; i++) {
@@ -276,34 +298,34 @@ contract MarginTradeManager{
         if (!userExists) {
             tradersWithPositions.push(msg.sender);
         }
-        
+
         emit PositionOpened(
-            msg.sender, 
-            _positionSize, 
-            currentPrice, 
-            _leverage, 
-            _sltp, 
-            _reduceOnly, 
+            msg.sender,
+            _positionSize,
+            currentPrice,
+            _leverage,
+            _sltp,
+            _reduceOnly,
             _positionType
         );
     }
-    
+
     /**
      * @notice Close an open position
      */
     function closePosition() external {
         Position storage pos = positions[msg.sender];
         require(pos.open, "No open position");
-        
+
         _closePosition(msg.sender);
     }
 
     function _closePosition(address trader) internal {
         Position storage pos = positions[trader];
         require(pos.open, "No open position");
-        
+
         uint256 currentPrice = getLatestPrice(pos.collateralToken);
-        
+
         // Calculate PnL
         int256 pnl;
         if (pos.positionType == PositionType.LONG) {
@@ -311,49 +333,35 @@ contract MarginTradeManager{
         } else {
             pnl = int256((pos.entryPrice - currentPrice) * pos.positionSize);
         }
-        
+
         // Calculate closing fee
         uint256 positionValue = pos.positionSize * currentPrice;
         uint256 closeFee = (positionValue * closeFeeRate) / 10000;
-        
+
         // Update realized PnL
         if (pnl > 0) {
             pos.realizedPnL += uint256(pnl);
         }
-        
+
         // Add PnL to margin (can be negative)
         int256 newMargin = int256(pos.margin) + pnl - int256(closeFee);
         uint256 finalMargin = newMargin > 0 ? uint256(newMargin) : 0;
-        
+
         // Transfer fee to fee collector based on token type
         if (pos.collateralToken == address(0)) {
             payable(feeCollector).transfer(closeFee);
         } else {
             IERC20(pos.collateralToken).transfer(feeCollector, closeFee);
         }
-        
+
         // Reset position
         _resetPositionDetails(msg.sender, finalMargin, closeFee);
-        // pos.open = false;
-        // pos.positionSize = 0;
-        // pos.entryPrice = 0;
-        // pos.leverage = 0;
-        // pos.sltp = 0;
-        // pos.reduceOnly = false;
-        // pos.lastEffectiveMargin = 0;
-        // pos.lastMarginRatio = 0;
-        
-        // // Update margin and fees
-        // pos.margin = finalMargin;
-        // pos.fees += closeFee;
-        // pos.lastUpdated = block.timestamp;
-        
+
         emit PositionClosed(msg.sender, pnl, closeFee, currentPrice);
-        
+
         // Remove user from active positions array
         removeTraderFromArray(msg.sender);
     }
-
 
     /**
      * @notice Update position metrics with latest price
@@ -361,9 +369,9 @@ contract MarginTradeManager{
     function updatePosition() external {
         Position storage pos = positions[msg.sender];
         require(pos.open, "No open position");
-        
+
         uint256 currentPrice = getLatestPrice(pos.collateralToken);
-        
+
         // Calculate PnL
         int256 pnl;
         if (pos.positionType == PositionType.LONG) {
@@ -371,25 +379,27 @@ contract MarginTradeManager{
         } else {
             pnl = int256((pos.entryPrice - currentPrice) * pos.positionSize);
         }
-        
+
         // Update metrics
         pos.lastEffectiveMargin = int256(pos.margin) + pnl;
-        
+
         if (pos.lastEffectiveMargin <= 0) {
             pos.lastMarginRatio = 0;
         } else {
-            pos.lastMarginRatio = (uint256(pos.lastEffectiveMargin) * 100) / (pos.positionSize * currentPrice);
+            pos.lastMarginRatio =
+                (uint256(pos.lastEffectiveMargin) * 100) /
+                (pos.positionSize * currentPrice);
         }
-        
+
         pos.lastUpdated = block.timestamp;
-        
+
         emit PositionUpdated(
-            msg.sender, 
-            pos.lastEffectiveMargin, 
-            pos.lastMarginRatio, 
+            msg.sender,
+            pos.lastEffectiveMargin,
+            pos.lastMarginRatio,
             pos.lastUpdated
         );
-        
+
         // Check if position should be liquidated
         bool shouldLiquidate = liquidationEngine.checkLiquidation(msg.sender);
         if (shouldLiquidate) {
@@ -399,65 +409,67 @@ contract MarginTradeManager{
     }
 
     function _updatePositionDetails(
-            address user,
-            uint256 _positionSize,
-            uint256 currentPrice,
-            uint256 _leverage,
-            uint256 _sltp,
-            bool _reduceOnly,
-            PositionType _positionType
-        ) internal {
-            Position storage pos = positions[user];
-            
-            // Update position
-            pos.positionSize = _positionSize;
-            pos.entryPrice = currentPrice;
-            pos.open = true;
-            pos.leverage = _leverage;
-            pos.sltp = _sltp;
-            pos.reduceOnly = _reduceOnly;
-            pos.positionType = _positionType;
-            
-            // Calculate effective margin and margin ratio
-            pos.lastEffectiveMargin = int256(pos.margin);
-            pos.lastMarginRatio = (pos.margin * 100) / (pos.positionSize * currentPrice);
-            pos.lastUpdated = block.timestamp;
-    }
-    
-    function _resetPositionDetails(
-            address user,
-            uint256 finalMargin,
-            uint256 closeFee
-        ) internal {
-            Position storage pos = positions[user];
-            
-            // Reset position
-            pos.open = false;
-            pos.positionSize = 0;
-            pos.entryPrice = 0;
-            pos.leverage = 0;
-            pos.sltp = 0;
-            pos.reduceOnly = false;
-            pos.lastEffectiveMargin = 0;
-            pos.lastMarginRatio = 0;
+        address user,
+        uint256 _positionSize,
+        uint256 currentPrice,
+        uint256 _leverage,
+        uint256 _sltp,
+        bool _reduceOnly,
+        PositionType _positionType
+    ) internal {
+        Position storage pos = positions[user];
 
-            // Update margin and fees
-            pos.margin = finalMargin;
-            pos.fees += closeFee;
-            pos.lastUpdated = block.timestamp;
-            
+        // Update position
+        pos.positionSize = _positionSize;
+        pos.entryPrice = currentPrice;
+        pos.open = true;
+        pos.leverage = _leverage;
+        pos.sltp = _sltp;
+        pos.reduceOnly = _reduceOnly;
+        pos.positionType = _positionType;
+
+        // Calculate effective margin and margin ratio
+        pos.lastEffectiveMargin = int256(pos.margin);
+        pos.lastMarginRatio =
+            (pos.margin * 100) /
+            (pos.positionSize * currentPrice);
+        pos.lastUpdated = block.timestamp;
+    }
+
+    function _resetPositionDetails(
+        address user,
+        uint256 finalMargin,
+        uint256 closeFee
+    ) internal {
+        Position storage pos = positions[user];
+
+        // Reset position
+        pos.open = false;
+        pos.positionSize = 0;
+        pos.entryPrice = 0;
+        pos.leverage = 0;
+        pos.sltp = 0;
+        pos.reduceOnly = false;
+        pos.lastEffectiveMargin = 0;
+        pos.lastMarginRatio = 0;
+
+        // Update margin and fees
+        pos.margin = finalMargin;
+        pos.fees += closeFee;
+        pos.lastUpdated = block.timestamp;
     }
 
     // --- Helper Functions ---
-    
+
     /**
      * @notice Get the latest price from the price feed
      * @return price The latest price
      */
-    function getLatestPrice(address tokenAddress) public view returns (uint256 price) {
+    function getLatestPrice(
+        address tokenAddress
+    ) public view returns (uint256 price) {
         return liquidationEngine.getLatestPrice(tokenAddress);
     }
-
 
     /**
      * @notice Remove a trader from the active positions array
@@ -467,7 +479,9 @@ contract MarginTradeManager{
         for (uint i = 0; i < tradersWithPositions.length; i++) {
             if (tradersWithPositions[i] == trader) {
                 // Swap with the last element and pop
-                tradersWithPositions[i] = tradersWithPositions[tradersWithPositions.length - 1];
+                tradersWithPositions[i] = tradersWithPositions[
+                    tradersWithPositions.length - 1
+                ];
                 tradersWithPositions.pop();
                 break;
             }
@@ -475,26 +489,24 @@ contract MarginTradeManager{
     }
 
     function _calculateAndCollectFee(
-        address user, 
-        uint256 positionValue, 
+        address user,
+        uint256 positionValue,
         uint256 feeRate
     ) internal returns (uint256) {
         Position storage pos = positions[user];
         uint256 fee = (positionValue * feeRate) / 10000;
-        
+
         // Update fees and deduct from margin
         pos.fees += fee;
         pos.margin -= fee;
-        
+
         // Transfer fee based on collateral type
         if (pos.collateralToken == address(0)) {
             payable(feeCollector).transfer(fee);
         } else {
             IERC20(pos.collateralToken).transfer(feeCollector, fee);
         }
-        
+
         return fee;
     }
-    
 }
-
