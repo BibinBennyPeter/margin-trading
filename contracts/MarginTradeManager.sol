@@ -56,6 +56,17 @@ contract MarginTradeManager {
     uint256 public maxLeverage = 100; // 100x max leverage
     uint256 public minMargin = 0.01 ether;
 
+    // SafeERC20 wrapper
+    using SafeERC20 for IERC20;
+
+    // Reentrancy lock
+    bool private locked;
+    modifier nonReentrant() {
+        require(!locked, "Reentrant call");
+        locked = true;
+        _;
+        locked = false;
+    }
     // Events
     event MarginDeposited(
         address indexed user,
@@ -173,7 +184,7 @@ contract MarginTradeManager {
      * @param tokenAddress Address of the ERC20 token to deposit
      * @param amount Amount of tokens to deposit
      */
-    function depositMarginERC20(address tokenAddress, uint256 amount) external {
+    function depositMarginERC20(address tokenAddress, uint256 amount) external nonReentrant{
         require(supportedCollateralTokens[tokenAddress], "Token not supported");
         require(amount > 0, "Deposit must be > 0");
 
@@ -194,7 +205,7 @@ contract MarginTradeManager {
         }
 
         // Transfer tokens from user to contract
-        IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
 
         // Update margin
         pos.margin += amount;
@@ -206,7 +217,7 @@ contract MarginTradeManager {
      * @notice Withdraw available margin (margin not locked in positions)
      * @param amount Amount of margin to withdraw
      */
-    function withdrawMargin(uint256 positionId, uint256 amount) external {
+    function withdrawMargin(uint256 positionId, uint256 amount) external nonReentrant{
         Position storage pos = positions[msg.sender][positionId];
         require(amount > 0, "Withdraw amount must be > 0");
 
@@ -232,7 +243,7 @@ contract MarginTradeManager {
             payable(msg.sender).transfer(amount);
         } else {
             // Transfer ERC20 tokens
-            IERC20(pos.collateralToken).transfer(msg.sender, amount);
+            IERC20(pos.collateralToken).safeTransfer(msg.sender, amount);
         }
 
         emit MarginWithdrawn(msg.sender, pos.collateralToken, amount);
@@ -252,7 +263,7 @@ contract MarginTradeManager {
         uint256 _sltp,
         bool _reduceOnly,
         PositionType _positionType
-    ) external {
+    ) external nonReentrant{
         // Retrieve the user's current position count as the new position ID.
         uint256 newPositionId = userPositionCount[msg.sender];
         userPositionCount[msg.sender]++;
@@ -308,7 +319,7 @@ contract MarginTradeManager {
         if (pos.collateralToken == address(0)) {
             payable(feeCollector).transfer(openFee);
         } else {
-            IERC20(pos.collateralToken).transfer(feeCollector, openFee);
+            IERC20(pos.collateralToken).safeTransfer(feeCollector, openFee);
         }
 
         // Add user to active positions if not already there
@@ -337,7 +348,7 @@ contract MarginTradeManager {
     /**
      * @notice Close an open position
      */
-    function closePosition(uint256 positionId) external {
+    function closePosition(uint256 positionId) external nonReentrant{
         _closePosition(positionId);
     }
 
@@ -373,7 +384,7 @@ contract MarginTradeManager {
         if (pos.collateralToken == address(0)) {
             payable(feeCollector).transfer(closeFee);
         } else {
-            IERC20(pos.collateralToken).transfer(feeCollector, closeFee);
+            IERC20(pos.collateralToken).safeTransfer(feeCollector, closeFee);
         }
 
         // Reset position
@@ -391,7 +402,7 @@ contract MarginTradeManager {
     /**
      * @notice Update position metrics with latest price
      */
-    function updatePosition(uint256 positionId) external {
+    function updatePosition(uint256 positionId) external nonReentrant{
         Position storage pos = positions[msg.sender][positionId];
         require(pos.open, "No open position");
 
@@ -545,7 +556,7 @@ contract MarginTradeManager {
         if (pos.collateralToken == address(0)) {
             payable(feeCollector).transfer(fee);
         } else {
-            IERC20(pos.collateralToken).transfer(feeCollector, fee);
+            IERC20(pos.collateralToken).safeTransfer(feeCollector, fee);
         }
 
         return fee;
